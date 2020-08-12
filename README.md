@@ -6,8 +6,10 @@ This is an interactive python script to scrape AI Dungeon and place the prompt r
 
 1. Clone this repository.
 2. Install the dependencies
+    1. [Install Dolt](https://www.dolthub.com/docs/tutorials/installation/)
     1. pip3 install selenium
-    2. [Install the chromedriver](https://sites.google.com/a/chromium.org/chromedriver/downloads) in the directory where the scraper lives.
+    2. pip3 install doltpy
+    3. [Install the chromedriver](https://sites.google.com/a/chromium.org/chromedriver/downloads) in the directory where the scraper lives.
 
 # Use
 
