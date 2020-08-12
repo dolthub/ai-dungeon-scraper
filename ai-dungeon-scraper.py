@@ -1,18 +1,18 @@
 #!/usr/bin/python3
 
 import argparse
+import numbers 
 import re
+import subprocess
 import uuid 
 
 from time import sleep
 
-from doltpy.core import Dolt
+from doltpy.core import Dolt, DoltException
 from mysql.connector import connect
 from selenium import webdriver
 from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import NoSuchElementException
-
-
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -65,9 +65,7 @@ def login(driver, user, password):
     except NoSuchElementException:
         return
 
-def collect_settings_info(driver):
-    settings = {}
-    
+def collect_settings_info(driver, settings):
     # Go To Settings
     hamburger = driver.find_element_by_xpath("//div[@aria-label='Open Menu']")
     hamburger.click()
@@ -86,20 +84,20 @@ def collect_settings_info(driver):
     elif ( driver.find_element_by_xpath("//div[@aria-label='Dragon (selected)']") ):
         ai_mode='griffin'
     else:
-        print("We done fucked up")
-        exit
+        print("Can't parse AI mode")
+        exit(1)
     
-    settings['ai_mode'] = ai_mode
+    settings['ai_model_type'] = ai_mode
 
     randomness_el = driver.find_element_by_xpath("//div[contains(text(), 'Randomness')]")
     reg = 'Randomness:\s([\d\.]+).*'
     randomness = re.findall(reg, randomness_el.text)[0]
-    settings['randomness'] = randomness
+    settings['randomness'] = float(randomness)
     
     length_el = driver.find_element_by_xpath("//div[contains(text(), 'Length')]")
     reg = 'Length:\s([\d]+).*'
     length = re.findall(reg, length_el.text)[0]
-    settings['length'] = length
+    settings['length'] = int(length)
 
     direct_dialog = driver.find_element_by_xpath("//input[@aria-label='Direct Dialog']")
     settings['direct_dialog'] = direct_dialog.is_selected()
@@ -108,8 +106,6 @@ def collect_settings_info(driver):
     cancel_link = driver.find_element_by_xpath("//div[@aria-label='Cancel']")
     cancel_link.click()
     sleep(1)
-
-    return settings
 
 def play_session(driver, session, retries):
     # Start New Session
@@ -139,7 +135,12 @@ def play_session(driver, session, retries):
             print("Please wait for reply...")
     
             pr = prompt_response(driver, textareas[1], prompt, retries)
-            print(pr['response'][-1])
+            response = pr['response'][-1]
+            if ( response == ''):
+                print("ERROR: AI Dungeon did not respond with a response")
+            else:
+                print(response)
+                
             session['prs'].append(pr)
 
 def get_session_id():
@@ -165,7 +166,6 @@ def prompt_response(driver, textarea, prompt, retries):
         
     prompt_response['response'].append(get_response(prompt, spans))
 
-    # Retries Disabled.
     if retries > 0:
         retry_buttons = driver.find_elements_by_xpath(
             "//div[@aria-label='retry']"
@@ -209,10 +209,98 @@ def get_prompt_type(driver):
             except NoSuchElementException:
                 return ''
 
-def write_to_dolt():
-    repo = Dolt.clone("Liquidata/ai-dungeon", "/tmp/ai-dungeon/")
-
+def escape_sql(string):
+    string = string.replace("'", "\\'")
     
+    return string
+            
+def prepare_sql(sql_file, settings, session):
+    f = open(sql_file, "w")
+
+    # Create settings SQL
+    keys = ['user',
+            'session_id',
+            'ai_model_type',
+            'randomness',
+            'length',
+            'direct_dialog'
+            ]
+    sql = 'insert into settings(' + ', '.join(keys) + ') values ('
+
+    first = 1
+    for key in keys:
+        if first:
+            first = 0
+        else:
+            sql += ', '
+        
+        if isinstance(settings[key], numbers.Number):
+            sql += str(settings[key])
+        else :
+            sql += "'" + settings[key] + "'"
+
+    sql += ");\n"
+
+    f.write(sql)
+
+    # Create Session SQL
+    cols = [
+        'user',
+        'session_id',
+        'setting',
+        'sequence_number',
+        'prompt_type',
+        'prompt',
+        'response_id',
+        'response'
+        ]
+    base_sql = 'insert into prompt_response(' + ', '.join(cols) + ') values ('
+
+    base_sql += "'" + session['user'] + "', " 
+    base_sql += "'" + session['session_id'] + "', "
+    base_sql += "'" + session['setting'] + "', "
+
+    i = 0
+    for pr in session['prs']:
+        prompt_sql = base_sql
+        prompt_sql += str(i) + ", "
+        prompt_sql += "'" + pr['prompt_type'] + "', "
+        prompt_sql += "'" + escape_sql(pr['prompt']) + "', "
+
+        
+        j = 0
+        for response in pr['response']:
+            response_sql = prompt_sql
+            response_sql += str(j) + ", "
+            response_sql += "'" + escape_sql(response) + "'"
+
+            response_sql += ");\n"
+
+            f.write(response_sql)
+            
+            j += 1
+
+        i+= 1
+            
+def write_to_dolt(sql_file):
+    org = 'Liquidata'
+    name = 'ai-dungeon'
+    repo = None
+    try:
+        repo = Dolt.clone("Liquidata/ai-dungeon")
+    except FileExistsError:
+        repo = Dolt(name)
+        try:
+            repo.status()
+            repo.pull('origin')
+        except DoltException:
+            print("Not a valid Dolt repository")
+            exit(1)
+
+    subprocess.call("cd " + name + " && dolt sql < ../" + sql_file, shell=True)
+
+    print("Data written to local ai-dungeon Dolt repository. "
+          "Add, commit, and push if you would like to contribute it.")
             
 def main():
     chrome_options = webdriver.ChromeOptions()
@@ -220,27 +308,36 @@ def main():
 
     args = parse_args()    
 
-    driver = webdriver.Chrome(executable_path="/Users/timsehn/liquidata/dolt/ai-dungeon/chromedriver", options=chrome_options)
+    assert args.email, "--email required"
+    assert args.password, "--password required"
+    
+    driver = webdriver.Chrome(executable_path="./chromedriver", options=chrome_options)
 
-    session  = {}
+    settings  = {}
 
-    session['user'] = args.email
+    settings['user'] = args.email
 
     print("Logging into AI Dungeon")
     login(driver, args.email, args.password)
-    session['id'] = get_session_id()
-
+    settings['session_id'] = get_session_id()
+    
     print("Collecting Settings Information.")
-    session['settings'] = collect_settings_info(driver)
+    collect_settings_info(driver, settings)
 
     num_retries = 0
-    
-    print("Starting Session.")
-    play_session(driver, session, num_retries)
-    print(session)
 
-    write_to_dolt()
+    print("Starting Session.")
+    session = {}
+    session['user'] = settings['user']
+    session['session_id'] = settings['session_id']
+    play_session(driver, session, num_retries)
+
+    sql_file = "write.sql"
+    print("Preparing SQL...")
+    prepare_sql(sql_file, settings, session)
+    print("Writing to Dolt repo.")
+    write_to_dolt(sql_file)    
     
-    # driver.close()
+    driver.close()
 
 main()
