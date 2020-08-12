@@ -9,7 +9,7 @@ import uuid
 from time import sleep
 
 from doltpy.core import Dolt, DoltException
-from mysql.connector import connect
+
 from selenium import webdriver
 from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import NoSuchElementException
